@@ -1,5 +1,5 @@
 package Apache::Cache;
-#$Id: Cache.pm,v 1.5 2001/06/26 13:58:31 rs Exp $
+#$Id: Cache.pm,v 1.6 2001/06/26 21:08:17 rs Exp $
 
 BEGIN
 {
@@ -8,7 +8,8 @@ BEGIN
     use Carp;
     use Apache::SharedMem qw(:all);
     use Time::ParseDate;
-    use Exporter ();
+
+    use base qw(Apache::SharedMem Exporter);
 
     %Apache::Cache::EXPORT_TAGS = 
     (
@@ -22,8 +23,7 @@ BEGIN
     use constant EXPIRES_NOW    => 1;
     use constant EXPIRES_NEVER  => 0;
 
-    @Apache::Cache::ISA         = qw(Apache::SharedMem Exporter);
-    $Apache::Cache::VERSION     = '0.01';
+    $Apache::Cache::VERSION     = '0.02';
 }
 
 sub new
@@ -33,6 +33,7 @@ sub new
 
     my $options = 
     {
+        namespace           => (caller())[0],
         cachename           => undef(),
         default_expires_in  => EXPIRES_NEVER,
         max_keys            => undef(),
@@ -55,10 +56,11 @@ sub new
     foreach my $name (qw(cachename))
     { 
         croak("$pkg object creation missing $name parameter.")
-          unless(exists($options->{$name}) && $options->{$name} ne '');
+          unless(defined($options->{$name}) && $options->{$name} ne '');
     }
 
-    my $self = $class->SUPER::new(@_);
+    my $self = $class->SUPER::new(@_, namespace=>$options->{namespace});
+    return(undef()) unless(defined($self));
     $self->{cache_options} = $options;
 
     unless($self->SUPER::exists($options->{cachename}, NOWAIT))
@@ -120,10 +122,7 @@ sub set
         return(undef());
     }
 
-    my $data = $self->_get_datas || return(undef());
-
     my $timeout;
-
     if($time)
     {
         if($time =~ m/\D/)
@@ -148,18 +147,27 @@ sub set
 
     $self->_debug('timeout is set for expires in ', ($timeout - time()), ' seconds');
 
-    $data->{$key} = $value;
-    $data->{'_cache_metadata'}->{'timestamps'}->{$key} = $timeout;
-    push(@{$data->{'_cache_metadata'}->{'queue'}}, $key);
+    if($self->lock(LOCK_EX|LOCK_NB))
+    {
+        my $data = $self->_get_datas || return(undef());
+        $data->{$key} = $value;
+        $data->{'_cache_metadata'}->{'timestamps'}->{$key} = $timeout;
+        push(@{$data->{'_cache_metadata'}->{'queue'}}, $key);
 
-    $self->_check_keys($data);
-    $self->_check_size($data);
+        $self->_check_keys($data);
+        $self->_check_size($data);
 
-    $self->SUPER::set($self->{cache_options}->{cachename}=>$data, NOWAIT);
-    return(undef()) if($self->status eq FAILURE);
+        $self->SUPER::set($self->{cache_options}->{cachename}=>$data, NOWAIT);
+        return(undef()) if($self->status eq FAILURE);
 
-
-    return($value);
+        return($value);
+    }
+    else
+    {
+        $self->_set_error('can\'t get exclusive lock for "set" method');
+        $self->_set_status(FAILURE);
+        return(undef());
+    }
 }
 
 sub get
@@ -202,7 +210,7 @@ sub delete
     if($self->lock(LOCK_EX|LOCK_NB))
     {
         my $data = $self->_get_datas || return(undef());
-        if(exists data->{$key})
+        if(exists $data->{$key})
         {
             $rv = delete($data->{$key});
             delete($data->{_cache_metadata}->{timestamps}->{$key});
