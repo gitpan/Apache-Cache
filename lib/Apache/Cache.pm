@@ -1,5 +1,5 @@
 package Apache::Cache;
-#$Id: Cache.pm,v 1.15 2001/08/29 07:45:32 rs Exp $
+#$Id: Cache.pm,v 1.24 2001/09/27 12:56:27 rs Exp $
 
 =pod
 
@@ -9,35 +9,38 @@ Apache::Cache - Cache data accessible between Apache childrens
 
 =head1 SYNOPSIS
 
-    use Apache::Cache qw(:all);
+    use Apache::Cache qw(:status);
 
-    my $cache = new Apache::Cache(cachename=>"dbcache", default_expires_in=>"5 minutes");
+    my $cache = new Apache::Cache(default_expires_in=>"5 minutes");
 
-    my $value = get_data('value_45');
-    $cache->set('value_45'=>$value);
-    print STDERR "can't save data in the cache" if($cache->status eq FAILURE);
+    # if the if the next line is called within 10 minutes, then this 
+    # will return the cache value overwise, this will return undef and the
+    # status method will be equal to the constant EXPIRED (exported by Apache::Cache
+    # on demande via the :status tag)
 
-1 minute past
+    # the next line try to get the data from the cache, if the data is stored in
+    # in the cache and if it not expired, then this return the data. Otherwise
+    # if data have never been store in the cache, or if it's expired, this will
+    # return undef and the status() method will be equal to constant EXPIRED (exported
+    # by Apache::Cache on demand, via the :status tag)
 
-    my $value = $cache->get('value_45');
-    # $value equal 'data'
+    my $value = $cache->get('Key');
 
-10 minutes past
-
-    my $value = $cache->get('value_45');
-    # $value equal 'undef()'
     if($cache->status eq EXPIRED)
     {
-        # update value
-        $cache->lock(LOCK_EX); # optional
-        $value = get_data('value_45');
-        $cache->set('value_45' => $value);
-        $cache->unlock;
+        # can't get the data from the cache, we will need to get it by the normal way
+        # (via database, from file...)
+        $value = get_my_data('Key'); # here, the get_my_data() function is a function of your
+                                     # programe that generate a fresh value
+
+        # this data have to expires in 30 secondes
+        my $expires_in = '30 secondes';
+        $cache->set(Key => $value, $expires_in);
     }
     elsif($cache->status eq FAILURE)
     {
-        # don't use cache, cache maybe busy by another child
-        $value = get_data('value_45');
+        # don't use cache, cache maybe busy by another child or something goes wrong
+        $value = get_my_data('Key');
     }
 
 =head1 DESCRIPTION
@@ -46,6 +49,10 @@ This module allows you to cache data easily through shared memory. Whithin the f
 of an apache/mod_perl use, this cache is accessible from any child process. The data 
 validity is managed in the Cache::Cache model, but as well based on time than on size 
 or number of keys.
+
+Additionnally, you can implement a cache with Apache::Cache in your module without the risk
+of namespace clash because Apache::Cache is enclosed in the constructor's package's caller 
+(see L<Apache::SharedMem> for more details).
 
 =head1 USAGE
 
@@ -75,17 +82,21 @@ BEGIN
 
     %Apache::Cache::EXPORT_TAGS = 
     (
-        all       => [qw(EXPIRED SUCCESS FAILURE EXPIRES_NOW EXPIRES_NEVER)],
+        all       => [qw(EXPIRED SUCCESS FAILURE EXPIRES_NOW EXPIRES_NEVER LOCK_EX LOCK_SH LOCK_UN LOCK_NB)],
         expires   => [qw(EXPIRES_NOW EXPIRES_NEVER)],
         status    => [qw(SUCCESS FAILURE EXPIRED)],
+        lock      => [qw(LOCK_EX LOCK_SH LOCK_UN LOCK_NB)],
     );
     @Apache::Cache::EXPORT_OK   = @{$Apache::Cache::EXPORT_TAGS{'all'}};
 
-    use constant EXPIRED        => -1;
+    # SUCCESS => 1
+    # FAILURE => 2
+    use constant EXPIRED        => 4;
+
     use constant EXPIRES_NOW    => 1;
     use constant EXPIRES_NEVER  => 0;
 
-    $Apache::Cache::VERSION     = '0.04';
+    $Apache::Cache::VERSION     = '0.05';
 }
 
 =pod
@@ -93,6 +104,57 @@ BEGIN
 =head1 METHODS
 
 =head2 new  (cachename=> 'cachename', default_expires_in=> '1 second', max_keys=> 50, max_size=> 1_000)
+
+Constuct a new Apache::Cache's instance.
+
+=over 4
+
+=item *
+
+C<default_expires_in> optional, date
+
+The default data expiration time for objects place in the cache. Integers is interpreted in seconds, constant
+EXPIRES_NOW make data expire imédiately and constant EXPIRES_NEVER make the data never expire. The
+timeout can also be in a human readable format, see L<Time::ParseDate> for this format specification.
+
+Defaults to constant EXPIRES_NEVER if not explicitly set. 
+
+=item *
+
+C<max_keys> optional, integer
+
+If you set more than C<max_keys> keys, olders are automatically removed. Usefull to control the cache's grow.
+NOTE: if you know the exact length of your keys, use this option to control the cache size instead of the
+C<max_size> option.
+
+Defaults to no max_keys
+
+=item *
+
+C<max_size> optional, integer
+
+no yet implemented
+
+=item *
+
+C<cachename> optional, string
+
+The namespace associated with this cache. 
+
+Defaults to "Default" if not explicitly set. 
+
+=item *
+
+C<default_lock_timeout> optional, integer
+
+Number of second(s) to wait for locks used each time manipulating data in the shared memory.
+
+Defaults to not waiting. This means a get() - for expample - on a temporary locked
+key - certainely by another process - will return a FAILED status.
+
+=back
+
+Additionnaly, all Apache::SharedMem parameters are also customizable. See L<Apache::SharedMem>.
 
 =cut
 
@@ -104,10 +166,11 @@ sub new
     my $options = 
     {
         namespace           => (caller())[0],
-        cachename           => undef(),
+        cachename           => 'Default',
         default_expires_in  => EXPIRES_NEVER,
         max_keys            => undef(),
         max_size            => undef(),
+        default_lock_timeout=> undef(),
     };
 
     croak("odd number of arguments for object construction")
@@ -118,12 +181,14 @@ sub new
         if(exists($options->{lc($_[$x])}))
         {
             $options->{lc($_[$x])} = $_[($x + 1)];
+            # We split off this parameter from the main argument list.
+            # Remaining arguments will be send to Apache::SharedMem
             splice(@_, $x, 2);
             $x -= 2;
         }
     }
 
-    foreach my $name (qw(cachename))
+    foreach my $name (qw(cachename namespace))
     { 
         croak("$pkg object creation missing $name parameter.")
           unless(defined($options->{$name}) && $options->{$name} ne '');
@@ -133,19 +198,10 @@ sub new
     return(undef()) unless(defined($self));
     $self->{cache_options} = $options;
 
-    unless($self->SUPER::exists($options->{cachename}, NOWAIT))
+    unless($self->SUPER::exists($options->{cachename}, $self->_lock_timeout))
     {
         return(undef()) if($self->SUPER::status eq FAILURE);
-        my $cache_registry =
-        {
-            _cache_metadata => 
-            {
-                timestamps  => {},
-                queue       => [],
-            }
-        };
-        $self->SUPER::set($options->{cachename}=>$cache_registry, NOWAIT);
-        return(undef()) if($self->SUPER::status eq FAILURE);
+        $self->_init_cache || return undef;
     }
 
     bless($self, $class);
@@ -154,22 +210,41 @@ sub new
 
 =pod
 
-=head2 set (key => value, [timeout])
+=head2 set (identifier => data, [timeout])
 
-$cache->set(mykey=>'the data to cache', '15 minutes');
-if($cache->status eq FAILURE)
-{
-    warn("can't save data to cache: $cache->error");
-}
+    $cache->set(mykey=>'the data to cache', '15 minutes');
+    if($cache->status & FAILURE)
+    {
+        warn("can't save data to cache: $cache->error");
+    }
 
-key (required): key to set
+Store an item in the cache.
 
-value (required): value to set
+=over 4
 
-timeout (optional): can be on of EXPIRES_NOW, EXPIRES_NEVER (need import of :expires tag),
-or a time string like "10 minutes", "May 5 2010 01:30:00"... (see L<Time::ParseDate>).
+=item *
 
-On failure this method return C<undef()> and place status method to FAILURE.
+C<identifier> required, string
+
+A string uniquely identifying the data. 
+
+=item *
+
+C<data> required, scalar or reference to any perl data type, except CODE and GLOB 
+
+The data to store in the cache.
+
+=item *
+
+C<timeout> optional, date
+
+The data expiration time for objects place in the cache. Integers is interpreted in seconds, constant
+EXPIRES_NOW make data expire imédiately and constant EXPIRES_NEVER make the data never expire. The
+timeout can also be in a human readable format, see L<Time::ParseDate> for this format specification.
+
+=back
+
+On failure this method return C<undef()> and set status to FAILURE, see status() method below
 
 status : FAILURE SUCCESS
 
@@ -177,10 +252,11 @@ status : FAILURE SUCCESS
 
 sub set
 {
-    my $self  = shift;
-    my $key   = defined($_[0]) && $_[0] ne '' ? shift : croak(defined($_[0]) ? 'Not enough arguments for set method' : 'Invalid argument "" for set method');
-    my $value = defined($_[0]) ? shift : croak('Not enough arguments for set method');
-    my $time  = defined($_[0]) ? shift : $self->{cache_options}->{default_expires_in};
+    my $self         = shift;
+    my $key          = defined($_[0]) && $_[0] ne '' ? shift : croak(defined($_[0]) ? 'Not enough arguments for set method' : 'Invalid argument "" for set method');
+    my $value        = defined($_[0]) ? shift : croak('Not enough arguments for set method');
+    my $time         = defined($_[0]) ? shift : $self->{cache_options}->{default_expires_in};
+    my $lock_timeout = $self->{cache_options}->{default_lock_timeout};
     croak('Too many arguments for set method') if(@_);
     $self->_unset_error;
     $self->_debug;
@@ -205,6 +281,10 @@ sub set
                 return(undef());
             }
         }
+        elsif($time eq EXPIRES_NOW)
+        {
+            $timeout = EXPIRES_NOW;
+        }
         else
         {
             $timeout = time() + $time;
@@ -217,7 +297,7 @@ sub set
 
     $self->_debug('timeout is set for expires in ', ($timeout - time()), ' seconds');
 
-    if($self->lock(LOCK_EX|LOCK_NB))
+    if(defined $lock_timeout ? $self->lock(LOCK_EX, $lock_timeout) : $self->lock(LOCK_EX|LOCK_NB))
     {
         my $data = $self->_get_datas || return(undef());
         $data->{$key} = $value;
@@ -242,6 +322,34 @@ sub set
     }
 }
 
+=pod
+
+=head2 get (identifier)
+
+    my $value = $cache->get('Key');
+
+    if($cache->status & (EXPIRED | FAILURE)) # if status is EXPIRED or FAILURE
+    {
+        $value = 'fresh value';
+    }
+
+Fetch the data specified. If data where never set, or if data have expired, this method return
+C<undef> and status is set to EXPIRED.
+
+=over 4
+
+=item *
+
+C<identifier> required, string
+
+A string uniquely identifying the data. 
+
+=back
+
+status : FAILURE SUCCESS EXPIRED
+
+=cut
+
 sub get
 {
     if(@_ != 2)
@@ -260,7 +368,7 @@ sub get
     my $value   = $data->{$key};
     my $timeout = $data->{_cache_metadata}->{timestamps}->{$key};
 
-    if(!defined $timeout || ($timeout != EXPIRES_NEVER && $timeout <= time()))
+    if(!defined $timeout || $timeout == EXPIRES_NOW || ($timeout != EXPIRES_NEVER && $timeout <= time()))
     {
         $self->_set_error("data was expired");
         $self->delete($key); # if delete failed, error string will be its own but not status
@@ -274,6 +382,26 @@ sub get
     }
 }
 
+=pod
+
+=head2 delete (identifier)
+
+Delete the data associated with the identifier from the cache.
+
+=over 4
+
+=item *
+
+C<identifier> required, string
+
+A string uniquely identifying the data. 
+
+=back
+
+status: SUCCESS FAILURE
+
+=cut
+
 sub delete
 {
     if(@_ != 2)
@@ -281,10 +409,11 @@ sub delete
         confess('Apache::Cache: Too many arguments for "delete" method') if(@_ > 2);
         confess('Apache::Cache: Not enough arguments for "delete" method') if(@_ < 2);
     }
-    my($self, $key) = @_;
+    my($self, $key)  = @_;
+    my $lock_timeout = $self->{cache_options}->{default_lock_timeout};
 
-    my $rv;
-    if($self->lock(LOCK_EX|LOCK_NB))
+    my $rv = undef;
+    if(defined $lock_timeout ? $self->lock(LOCK_EX, $lock_timeout) : $self->lock(LOCK_EX|LOCK_NB))
     {
         my $data = $self->_get_datas || return(undef());
         if(exists $data->{$key})
@@ -293,12 +422,52 @@ sub delete
             delete($data->{_cache_metadata}->{timestamps}->{$key});
             $data->{_cache_metadata}->{queue} = \@{grep($_ ne $key, @{$data->{_cache_metadata}->{queue}})};
             $self->SUPER::set($self->{cache_options}->{cachename}=>$data);
-            return(undef()) if($self->status eq FAILURE);
+            return(undef()) if($self->status & FAILURE);
         }
         $self->unlock;
     }
     return($rv);
 }
+
+=head2 clear
+
+Remove all objects from the namespace associated with this cache instance.
+
+status: SUCCESS FAILURE
+
+=cut
+
+sub clear
+{
+    my $self = shift;
+    $self->_init_cache;
+}
+
+# inherited from Apache::SharedMem
+
+=head2 status
+
+Return the last called method status. This status should be used with bitmask operators
+&, ^, ~ and | like this :
+
+    # is last method failed ?
+    if($object->status & FAILURE) {something to do on failure}
+
+    # is last method don't succed ?
+    if($object->status ^ SUCCESS) {something to do on failure}
+
+    # is last method failed or expired ?
+    if($object->status & (FAILURE | EXPIRED)) {something to do on expired or failure}
+
+It's not recommended to use equality operator (== and !=) or (eq and ne), they may don't
+work in future versions.
+
+To import status' constants, you have to use the :status import tag, like below :
+
+    use Apache::Cache qw(:status);
+
+=cut
+    
 
 sub _check_keys
 {
@@ -346,11 +515,34 @@ sub _check_size
     return() unless(defined $max_size && $max_size);
 }
 
+sub _init_cache
+{
+    my $self = shift;
+    my $cache_registry =
+    {
+        _cache_metadata => 
+        {
+            timestamps  => {},
+            queue       => [],
+        }
+    };
+    $self->SUPER::set($self->{cache_options}->{cachename}=>$cache_registry, $self->_lock_timeout);
+
+    return($self->SUPER::status eq FAILURE ? undef : 1);
+}
+
+sub _lock_timeout
+{
+    my $self         = shift;
+    my $lock_timeout = $self->{cache_options}->{default_lock_timeout};
+    return(defined $lock_timeout ? $lock_timeout : NOWAIT);
+}
+
 sub _get_datas
 {
     my $self = shift;
     
-    my $data = $self->SUPER::get($self->{cache_options}->{cachename}, NOWAIT);
+    my $data = $self->SUPER::get($self->{cache_options}->{cachename}, $self->_lock_timeout);
     if($self->status eq FAILURE)
     {
         $self->_set_error("can't get the cacheroot: ", $self->error);
@@ -366,6 +558,57 @@ sub _get_datas
 1;
 
 =pod
+
+=head1 EXPORTS
+
+=head2 Default exports
+
+None.
+
+=head2 Available exports
+
+Following constant is available for exports : EXPIRED SUCCESS FAILURE 
+EXPIRES_NOW EXPIRES_NEVER LOCK_EX LOCK_SH LOCK_UN.
+
+=head2 Export tags defined
+
+The tag ":all" will get all of the above exports.
+Following tags are also available :
+
+=over 4
+
+=item
+
+:status
+
+Contents: SUCCESS FAILURE EXPIRED
+
+This tag is really recommended to the importation all the time.
+
+=item
+
+:expires
+
+Contents: EXPIRES_NOW EXPIRES_NEVER
+
+=item
+
+:lock
+
+Contents: LOCK_EX LOCK_SH LOCK_UN LOCK_NB
+
+=back
+
+=head1 KNOW BUGS
+
+Under mod_perl, with eavy load, this error may occured some time:
+
+    Apache::SharedMem object initialization: Unable to initialize root ipc shared memory
+    segment: File exists at /usr/local/lib/perl5/site_perl/5.005/Apache/SharedMem.pm line 929
+
+We not really understand the probleme source, so any help will be appreciated. For fixing
+this problem when it occured, you should stop apache, clean the ipc segment and restart
+apache.
 
 =head1 AUTHOR
 
@@ -391,7 +634,7 @@ Foundation, Inc. :
 
 =head1 COPYRIGHT
 
-Copyright (C) 2001 - Fininfo http://www.fininfo.fr
+Copyright (C) 2001 - Olivier Poitrey
 
 =head1 PREREQUISITES
 
@@ -404,6 +647,38 @@ L<Apache::SharedMem>
 =head1 HISTORY
 
 $Log: Cache.pm,v $
+Revision 1.24  2001/09/27 12:56:27  rs
+documentation upgrade
+
+Revision 1.23  2001/09/24 08:18:20  rs
+status now return bitmask values
+
+Revision 1.22  2001/09/21 16:24:13  rs
+new method clear
+new private methods _init_cache and _lock_timeout
+new constructor parameter 'default_lock_timeout'
+
+Revision 1.21  2001/09/21 12:42:53  rs
+adding pod section KNOW BUGS
+
+Revision 1.20  2001/09/20 12:40:18  rs
+Documentation update: add an EXPORTS section
+
+Revision 1.19  2001/09/19 16:22:38  rs
+fixe a pod bug
+
+Revision 1.18  2001/09/19 15:34:17  rs
+major doc update (METHOD section)
+
+Revision 1.17  2001/09/19 13:37:43  rs
+0.04 => 0.05
+
+Revision 1.16  2001/09/19 13:37:09  rs
+- constructor have now a default value for "cachename", and the 'cachename'
+parameter is now optional
+
+- Documentation upgrade (SINOPSYS simplified)
+
 Revision 1.15  2001/08/29 07:45:32  rs
 add mod_perl specifique documentation
 
