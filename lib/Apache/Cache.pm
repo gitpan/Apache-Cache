@@ -1,5 +1,57 @@
 package Apache::Cache;
-#$Id: Cache.pm,v 1.6 2001/06/26 21:08:17 rs Exp $
+#$Id: Cache.pm,v 1.10 2001/08/08 15:55:03 rs Exp $
+
+=pod
+
+=head1 NAME
+
+Apache::Cache - Cache data accessible between Apache childrens
+
+=head1 SYNOPSIS
+
+    use Apache::Cache qw(:all);
+
+    my $cache = new Apache::Cache(cachename=>"dbcache", default_expires_in=>"5 minutes");
+
+    my $value = get_data('value_45');
+    $cache->set('value_45'=>$value);
+    print STDERR "can't save data in the cache" if($cache->status eq FAILURE);
+
+1 minute past
+
+    my $value = $cache->get('value_45');
+    # $value equal 'data'
+
+10 minutes past
+
+    my $value = $cache->get('value_45');
+    # $value equal 'undef()'
+    if($cache->status eq EXPIRED)
+    {
+        # update value
+        $cache->lock(LOCK_EX); # optional
+        $value = get_data('value_45');
+        $cache->set('value_45' => $value);
+        $cache->unlock;
+    }
+    elsif($cache->status eq FAILURE)
+    {
+        # don't use cache, cache maybe busy by another child
+        $value = get_data('value_45');
+    }
+
+=head1 DESCRIPTION
+
+This module allows you to cache data easily through shared memory. Whithin the framework 
+of an apache/mod_perl use, this cache is accessible from any child process. The data 
+validity is managed in the Cache::Cache model, but as well based on time than on size 
+or number of keys.
+
+=head1 USAGE
+
+under construction
+
+=cut
 
 BEGIN
 {
@@ -23,8 +75,16 @@ BEGIN
     use constant EXPIRES_NOW    => 1;
     use constant EXPIRES_NEVER  => 0;
 
-    $Apache::Cache::VERSION     = '0.02';
+    $Apache::Cache::VERSION     = '0.03';
 }
+
+=pod
+
+=head1 METHODS
+
+=head2 new  (cachename=> 'cachename', default_expires_in=> '1 second', max_keys=> 50, max_size=> 1_000)
+
+=cut
 
 sub new
 {
@@ -180,8 +240,13 @@ sub get
     my($self, $key) = @_;
     
     my $data    = $self->_get_datas || return(undef());
-    my $timeout = $data->{_cache_metadata}->{timestamps}->{$key};
+    unless(exists $data->{$key})
+    {
+        $self->_set_status(EXPIRED);
+        return(undef());
+    }
     my $value   = $data->{$key};
+    my $timeout = $data->{_cache_metadata}->{timestamps}->{$key};
 
     if(!defined $timeout || ($timeout != EXPIRES_NEVER && $timeout <= time()))
     {
