@@ -1,5 +1,5 @@
 package Apache::Cache;
-#$Id: Cache.pm,v 1.10 2001/08/08 15:55:03 rs Exp $
+#$Id: Cache.pm,v 1.15 2001/08/29 07:45:32 rs Exp $
 
 =pod
 
@@ -49,7 +49,17 @@ or number of keys.
 
 =head1 USAGE
 
-under construction
+For mod_perl users:
+
+in your httpd.conf, put this directive:
+
+    PerlAddVar PROJECT_DOCUMENT_ROOT /path/to/your/project/root/
+
+and in your startup.pl:
+
+    use Apache::Cache ();
+
+See L<Apache::SharedMem> for more details.
 
 =cut
 
@@ -75,7 +85,7 @@ BEGIN
     use constant EXPIRES_NOW    => 1;
     use constant EXPIRES_NEVER  => 0;
 
-    $Apache::Cache::VERSION     = '0.03';
+    $Apache::Cache::VERSION     = '0.04';
 }
 
 =pod
@@ -218,7 +228,9 @@ sub set
         $self->_check_size($data);
 
         $self->SUPER::set($self->{cache_options}->{cachename}=>$data, NOWAIT);
-        return(undef()) if($self->status eq FAILURE);
+        my $rv = $self->status; # saving returned status
+        $self->unlock; # don't wait for Apache::SharedMem to auto unlock on destroy
+        return(undef()) if($rv eq FAILURE);
 
         return($value);
     }
@@ -251,8 +263,8 @@ sub get
     if(!defined $timeout || ($timeout != EXPIRES_NEVER && $timeout <= time()))
     {
         $self->_set_error("data was expired");
+        $self->delete($key); # if delete failed, error string will be its own but not status
         $self->_set_status(EXPIRED);
-        $self->delete($key);
         return(undef());
     }
     else
@@ -308,16 +320,18 @@ sub _check_keys
             if($metadata->{timestamps}->{$metadata->{queue}->[$i]} > $time)
             {
                 my $key = $metadata->{queue}->[$i];
+                $self->_debug("$key is out of date, discarding");
                 delete($data->{$key});
                 delete($metadata->{timestamps}->{$key});
-                $metadata->{queue} = \@{grep($_ ne $key, @{$metadata->{queue}})};
+                @{$metadata->{queue}} = grep($_ ne $key, @{$metadata->{queue}});
                 last if(--$nkeys <= $nkeys_target);
             }
         }
-        if($nkeys > $max_keys)
+        if($nkeys > $nkeys_target)
         {
             # splice of delete candidates
-            my @key2del = splice(@{$metadata->{queue}}, 0, ($nkeys - $nkeys_target));
+            my @key2del = splice(@{$metadata->{queue}}, 0, ($nkeys - $nkeys_target - 1));
+            $self->_debug('cleaning not timed out keys: ', join(', ', @key2del));
             delete(@$data{@key2del});
             delete(@{$metadata->{timestamps}}{@key2del});
         }
@@ -350,3 +364,60 @@ sub _get_datas
 }
 
 1;
+
+=pod
+
+=head1 AUTHOR
+
+Olivier Poitrey E<lt>rs@rhapsodyk.netE<gt>
+
+=head1 LICENCE
+
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 2 of the License, or (at
+your option) any later version.
+
+This program is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with the program; if not, write to the Free Software
+Foundation, Inc. :
+
+59 Temple Place, Suite 330, Boston, MA 02111-1307
+
+=head1 COPYRIGHT
+
+Copyright (C) 2001 - Fininfo http://www.fininfo.fr
+
+=head1 PREREQUISITES
+
+Apache::Cache needs Apache::SharedMem available from the CPAN.
+
+=head1 SEE ALSO
+
+L<Apache::SharedMem>
+
+=head1 HISTORY
+
+$Log: Cache.pm,v $
+Revision 1.15  2001/08/29 07:45:32  rs
+add mod_perl specifique documentation
+
+Revision 1.14  2001/08/28 13:22:46  rs
+major bugfix: _check_keys method wasn't clean keys correctly
+
+Revision 1.13  2001/08/28 08:42:38  rs
+set method wasn't unlock on exit !
+
+Revision 1.12  2001/08/17 13:26:36  rs
+some minor pod modifications
+
+Revision 1.11  2001/08/17 13:20:45  rs
+- fix major bug in "get" method: on first timeout, status was set to
+  "delete" method's status (often SUCCESS) instead of EXPIRED
+- add some sections to pod documentation
+

@@ -1,4 +1,4 @@
-Apache::Cache version 0.03
+Apache::Cache version 0.04
 ==========================
 
 INSTALLATION
@@ -17,25 +17,127 @@ This module requires these other modules and libraries:
   Apache::SharedMem
   Time::DateParse
 
-COPYRIGHT AND LICENCE
 
-This program is free software; you can redistribute it
-and/or modify it under the terms of the GNU General Public
-License as published by the Free Software Foundation;
-either version 2 of the License, or (at your option) any
-later version.
+CHANGES
 
-This program is distributed in the hope that it will be
-useful, but WITHOUT ANY WARRANTY; without even the implied
-warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR 
-PURPOSE. See the GNU General Public License for more details.
+0.04 Wed August 29 2001 09:42:00
+    - major bugfix in "get" method: on first timeout, status was set to 
+      "delete" method's status (often SUCCESS) instead of EXPIRED
+    - bugfix in "set" method: wasn't unlock segment !
+    - major bugfix in _check_key: use of max_keys parameter wasn't work correctly
 
-You should have received a copy of the GNU General Public
-License along with the program; if not, write to the Free
-Software Foundation, Inc. :
+0.03 Mon Jully 30, 2001 13:43:01
+    - fix major bug in "get" method: on unexists key, status was set to SUCCESS 
+      insted of EXPIRED
 
-59 Temple Place, Suite 330, Boston, MA 02111-1307
+0.02 Tue Junary 26, 2001 21:08:17
+    - correct major bugs.
 
-Copyright (C) 2001 - Olivier Poitrey <rs@rhapsodyk.net>
+0.01 Mon Junary 25, 2001 07:43:48
+    - Original version writen from scratch.
+    - Fixing EXPORT_OK
+    - Fixing referencing bug in delete method
 
+NAME
+    Apache::Cache - Cache data accessible between Apache childrens
 
+SYNOPSIS
+        use Apache::Cache qw(:all);
+
+        my $cache = new Apache::Cache(cachename=>"dbcache", default_expires_in=>"5 minutes");
+
+        my $value = get_data('value_45');
+        $cache->set('value_45'=>$value);
+        print STDERR "can't save data in the cache" if($cache->status eq FAILURE);
+
+    1 minute past
+
+        my $value = $cache->get('value_45');
+        # $value equal 'data'
+
+    10 minutes past
+
+        my $value = $cache->get('value_45');
+        # $value equal 'undef()'
+        if($cache->status eq EXPIRED)
+        {
+            # update value
+            $cache->lock(LOCK_EX); # optional
+            $value = get_data('value_45');
+            $cache->set('value_45' => $value);
+            $cache->unlock;
+        }
+        elsif($cache->status eq FAILURE)
+        {
+            # don't use cache, cache maybe busy by another child
+            $value = get_data('value_45');
+        }
+
+DESCRIPTION
+    This module allows you to cache data easily through shared memory.
+    Whithin the framework of an apache/mod_perl use, this cache is
+    accessible from any child process. The data validity is managed in the
+    Cache::Cache model, but as well based on time than on size or number of
+    keys.
+
+USAGE
+    For mod_perl users:
+
+    in your httpd.conf, put this directive:
+
+        PerlAddVar PROJECT_DOCUMENT_ROOT /path/to/your/project/root/
+
+    and in your startup.pl:
+
+        use Apache::Cache ();
+
+    See the Apache::SharedMem manpage for more details.
+
+METHODS
+  new  (cachename=> 'cachename', default_expires_in=> '1 second', max_keys=> 50, max_size=> 1_000)
+
+  set (key => value, [timeout])
+
+    $cache->set(mykey=>'the data to cache', '15 minutes'); if($cache->status
+    eq FAILURE) { warn("can't save data to cache: $cache->error"); }
+
+    key (required): key to set
+
+    value (required): value to set
+
+    timeout (optional): can be on of EXPIRES_NOW, EXPIRES_NEVER (need import
+    of :expires tag), or a time string like "10 minutes", "May 5 2010
+    01:30:00"... (see the Time::ParseDate manpage).
+
+    On failure this method return "undef()" and place status method to
+    FAILURE.
+
+    status : FAILURE SUCCESS
+
+AUTHOR
+    Olivier Poitrey <rs@rhapsodyk.net>
+
+LICENCE
+    This program is free software; you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by the
+    Free Software Foundation; either version 2 of the License, or (at your
+    option) any later version.
+
+    This program is distributed in the hope that it will be useful, but
+    WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General
+    Public License for more details.
+
+    You should have received a copy of the GNU General Public License along
+    with the program; if not, write to the Free Software Foundation, Inc. :
+
+    59 Temple Place, Suite 330, Boston, MA 02111-1307
+
+COPYRIGHT
+    Copyright (C) 2001 - Fininfo http://www.fininfo.fr
+
+PREREQUISITES
+    Apache::Cache needs Apache::SharedMem available from the CPAN.
+
+SEE ALSO
+    the Apache::SharedMem manpage

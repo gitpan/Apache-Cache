@@ -6,7 +6,7 @@ WriteMakefile
     'VERSION_FROM'	=> 'lib/Apache/Cache.pm', # finds $VERSION
     'PREREQ_PM'		=> 
     {
-        Apache::SharedMem   => '0.06',
+        Apache::SharedMem   => '0.07',
         Time::ParseDate     => '100.01_03_01',
     },
     ($] >= 5.005 ?    ## Add these new keywords supported since 5.005
